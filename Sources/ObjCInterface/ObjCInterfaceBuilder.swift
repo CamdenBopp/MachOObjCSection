@@ -34,9 +34,15 @@ public struct ObjCInterfaceBuilder<MachO: ObjCMetadataSource> {
     private let indexer: ObjCInterfaceIndexer<MachO>
     private let machO: MachO
 
-    public init(indexer: ObjCInterfaceIndexer<MachO>, machO: MachO) {
+    /// Whether every declaration this builder renders, plain or marked,
+    /// marks the structure of its comments. See
+    /// ``ObjCDeclarationRendering/ObjCRenderingContext/marksCommentStructure``.
+    public let marksCommentStructure: Bool
+
+    public init(indexer: ObjCInterfaceIndexer<MachO>, machO: MachO, marksCommentStructure: Bool = false) {
         self.indexer = indexer
         self.machO = machO
+        self.marksCommentStructure = marksCommentStructure
     }
 
     // MARK: - Rendering Context
@@ -55,7 +61,8 @@ public struct ObjCInterfaceBuilder<MachO: ObjCMetadataSource> {
             machO: machO,
             options: options,
             cTypeReplacements: cTypeReplacements,
-            ivarOffsetCommentBuilder: ivarOffsetCommentBuilder
+            ivarOffsetCommentBuilder: ivarOffsetCommentBuilder,
+            marksCommentStructure: marksCommentStructure
         )
     }
 
@@ -66,7 +73,8 @@ public struct ObjCInterfaceBuilder<MachO: ObjCMetadataSource> {
         machO: MachO,
         options: ObjCGenerationOptions,
         cTypeReplacements: [ObjCPrimitiveTypePattern: String],
-        ivarOffsetCommentBuilder: (@Sendable (Int) -> String)?
+        ivarOffsetCommentBuilder: (@Sendable (Int) -> String)?,
+        marksCommentStructure: Bool = false
     ) -> ObjCRenderingContext<MachO> {
         ObjCRenderingContext(
             machO: machO,
@@ -78,7 +86,8 @@ public struct ObjCInterfaceBuilder<MachO: ObjCMetadataSource> {
                 return isStruct
                     ? !indexer.containsStruct(named: name)
                     : !indexer.containsUnion(named: name)
-            }
+            },
+            marksCommentStructure: marksCommentStructure
         )
     }
 
@@ -214,14 +223,14 @@ public struct ObjCInterfaceBuilder<MachO: ObjCMetadataSource> {
 
         let declaration = finalClassInfo.semanticString(using: context)
         let rendering = suppliedClassGroup.map {
-            Self.declaration(declaration, under: $0.suppliedClass.kind.declarationComment)
+            Self.declaration(declaration, under: context.comment(.note($0.suppliedClass.kind.declarationComment)))
         } ?? declaration
         return isExcludedByExportFilter && marksOptionalContent ? Self.visibleWhileExportFilterIsOff(rendering) : rendering
     }
 
     @SemanticStringBuilder
-    private static func declaration(_ declaration: SemanticString, under comment: String) -> SemanticString {
-        Comment(comment)
+    private static func declaration(_ declaration: SemanticString, under comment: SemanticString) -> SemanticString {
+        comment
         BreakLine()
         declaration
     }

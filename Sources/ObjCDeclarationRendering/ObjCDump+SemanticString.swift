@@ -54,6 +54,22 @@ public final class ObjCRenderingContext<MachO: ObjCMetadataSource> {
     /// `ivarOffsetCommentBuilder`.
     public var ivarNamesWithUnknownOffset: Set<String>
 
+    /// Set to mark every comment the rendering adds with what it is and what
+    /// each of its segments is: the comment in an `AnnotationRegion` of its
+    /// kind (see the kinds this module adds to `AnnotationRegion.Kind`), each
+    /// segment — the `// ` marker, a label, a separator, a value — in an
+    /// `AnnotationSegment` of its role.
+    ///
+    /// The marks are not text. Freezing the rendering and separating them
+    /// with `separatingAnnotationRegions()` gives the rendering without them,
+    /// span for span, and a table of where each comment and segment lies in
+    /// it. Until then the atoms carry the marks in their identifiers and the
+    /// comments come in pieces: a rendering with its comment structure marked
+    /// is meant to be frozen and separated, not shown as is. The marks compose
+    /// with the `VisibilityRegion`s of a marked rendering
+    /// (`optionalContentMarking`), separated in either order.
+    public var marksCommentStructure: Bool
+
     public init(
         machO: MachO,
         options: ObjCGenerationOptions = .default,
@@ -63,7 +79,8 @@ public final class ObjCRenderingContext<MachO: ObjCMetadataSource> {
         classMethodIMPs: [String: UInt64] = [:],
         isExpandHandler: @escaping (_ name: String?, _ isStruct: Bool) -> Bool = { _, _ in true },
         optionalContentMarking: ObjCOptionalContentMarking? = nil,
-        ivarNamesWithUnknownOffset: Set<String> = []
+        ivarNamesWithUnknownOffset: Set<String> = [],
+        marksCommentStructure: Bool = false
     ) {
         self.machO = machO
         self.options = options
@@ -74,6 +91,7 @@ public final class ObjCRenderingContext<MachO: ObjCMetadataSource> {
         self.isExpandHandler = isExpandHandler
         self.optionalContentMarking = optionalContentMarking
         self.ivarNamesWithUnknownOffset = ivarNamesWithUnknownOffset
+        self.marksCommentStructure = marksCommentStructure
     }
 }
 
@@ -310,11 +328,11 @@ extension ObjCIvarInfo {
         context.optionalContent(.addIvarOffsetComments) {
             Space()
             if context.ivarNamesWithUnknownOffset.contains(name) {
-                Comment("offset: unknown")
+                context.comment(.unknownIvarOffset)
             } else if let ivarOffsetCommentBuilder = context.ivarOffsetCommentBuilder {
-                Comment(ivarOffsetCommentBuilder(offset))
+                context.comment(.ivarOffset(wordedByHost: ivarOffsetCommentBuilder(offset)))
             } else {
-                Comment("offset: \(offset)")
+                context.comment(.ivarOffset(offset))
             }
         }
     }
@@ -387,15 +405,11 @@ extension ObjCPropertyInfo {
         context.optionalContent(.addPropertyAttributesComments) {
             Joined(separator: " ", prefix: " ") {
                 if attributes.contains(.dynamic) {
-                    Comment("@dynamic \(name)")
+                    context.comment(.propertyDynamic(propertyName: name))
                 }
 
                 if let ivar {
-                    if ivar == name {
-                        Comment("@synthesize \(ivar)")
-                    } else {
-                        Comment("@synthesize \(name) = \(ivar)")
-                    }
+                    context.comment(.propertySynthesis(propertyName: name, ivarName: ivar))
                 }
             }
         }
@@ -407,10 +421,10 @@ extension ObjCPropertyInfo {
 
             Joined(separator: " ", prefix: " ") {
                 if let getterIMP = imps[getterName] {
-                    context.machO.impAddressComment(label: "getter IMP", rawValue: getterIMP)
+                    context.comment(context.machO.impAddressComment(label: "getter IMP", rawValue: getterIMP))
                 }
                 if let setterIMP = imps[setterName] {
-                    context.machO.impAddressComment(label: "setter IMP", rawValue: setterIMP)
+                    context.comment(context.machO.impAddressComment(label: "setter IMP", rawValue: setterIMP))
                 }
             }
         }
@@ -471,7 +485,7 @@ extension ObjCMethodInfo {
         
         context.optionalContent(.addMethodIMPAddressComments) {
             Space()
-            context.machO.impAddressComment(label: "IMP", rawValue: imp)
+            context.comment(context.machO.impAddressComment(label: "IMP", rawValue: imp))
         }
     }
 }
@@ -775,14 +789,14 @@ extension ObjCType {
             } else {
                 Keyword("id")
                 Space()
-                InlineComment("block")
+                context.comment(.typeNote("block"))
             }
         case .functionPointer:
             Keyword("void")
             Space()
             "*"
             Space()
-            InlineComment("function pointer")
+            context.comment(.typeNote("function pointer"))
         case .array:
             // Declarations write the dimensions after the name they declare
             // (see `arrayElementTypeAndDimensions`); an array reached here has
