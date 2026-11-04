@@ -8,6 +8,7 @@
 
 import Foundation
 @_spi(Support) import MachOKit
+internal import MachOKitExtensions
 
 // https://github.com/apple-oss-distributions/objc4/blob/01edf1705fbc3ff78a423cd21e03dfc21eb4d780/runtime/objc-runtime-new.h#L707
 
@@ -332,35 +333,47 @@ extension ObjCMethodList {
         // decoded through its rebase; taken raw, the fixup's distance to the
         // next one stays in the value, and in a 32-bit image the tag mask does
         // not clear it, so no name resolved.
-        let selectorReferenceFileOffset = resolvedOffset(
+        // A field that leads to no file bytes reads as nothing: offset 0, what
+        // these used to fall back on, is the image's header.
+        let selectorReferenceFileOffset = self.fileOffset(
             base: fileOffset,
-            relative: relativeIndirect.name.offset
-        ) ?? 0
+            entryOffset: entryOffset,
+            relative: relativeIndirect.name.offset,
+            in: machO
+        )
         let selectorReferenceOffset = resolvedOffset(
             base: entryOffset,
-            relative: relativeIndirect.name.offset
+            relative: relativeIndirect.name.offset,
+            in: machO
         ) ?? 0
-        let selectorReference: UInt64 = if machO.is64Bit {
-            (try? fileHandle.read(
-                offset: numericCast(selectorReferenceFileOffset),
-                as: UInt64.self
-            )) ?? 0
+        let selectorReference: UInt64 = if let selectorReferenceFileOffset {
+            if machO.is64Bit {
+                (try? fileHandle.read(
+                    offset: numericCast(selectorReferenceFileOffset),
+                    as: UInt64.self
+                )) ?? 0
+            } else {
+                numericCast((try? fileHandle.read(
+                    offset: numericCast(selectorReferenceFileOffset),
+                    as: UInt32.self
+                )) ?? 0)
+            }
         } else {
-            numericCast((try? fileHandle.read(
-                offset: numericCast(selectorReferenceFileOffset),
-                as: UInt32.self
-            )) ?? 0)
+            0
         }
-        let types = resolvedOffset(
+        let types = self.fileOffset(
             base: fileOffset,
+            entryOffset: entryOffset,
             relative: relativeIndirect.types.offset,
-            adjustment: 4
-        ) ?? 0
+            adjustment: 4,
+            in: machO
+        )
 
         let imp = resolvedOffset(
             base: entryOffset,
             relative: relativeIndirect.imp.offset,
-            adjustment: 8
+            adjustment: 8,
+            in: machO
         ) ?? 0
 
         return ObjCMethod(
@@ -371,9 +384,9 @@ extension ObjCMethodList {
                     value: selectorReference
                 )
             ),
-            types: fileHandle.readString(
-                offset: numericCast(types)
-            ) ?? "",
+            types: types.flatMap {
+                fileHandle.readString(offset: numericCast($0))
+            } ?? "",
             imp: imp
         )
     }
@@ -396,7 +409,8 @@ extension ObjCMethodList {
         let nameOffset = nameBaseOffset.flatMap {
             resolvedOffset(
                 base: $0,
-                relative: relativeDirect.name.offset
+                relative: relativeDirect.name.offset,
+                in: machO
             )
         }
 
@@ -405,21 +419,24 @@ extension ObjCMethodList {
             typesOffset = nameBaseOffset.flatMap {
                 resolvedOffset(
                     base: $0,
-                    relative: relativeDirect.types.offset
+                    relative: relativeDirect.types.offset,
+                    in: machO
                 )
             }
         } else {
             typesOffset = resolvedOffset(
                 base: entryOffset,
                 relative: relativeDirect.types.offset,
-                adjustment: 4
+                adjustment: 4,
+                in: machO
             )
         }
 
         let imp = resolvedOffset(
             base: entryOffset,
             relative: relativeDirect.imp.offset,
-            adjustment: 8
+            adjustment: 8,
+            in: machO
         ) ?? 0
 
         return ObjCMethod(
@@ -435,21 +452,62 @@ extension ObjCMethodList {
 }
 
 extension ObjCMethodList {
+    /// Where a relative field leads, from the same place as `base` counts:
+    /// the Mach-O header for a file, the main cache's start for a dyld cache
+    /// image. The delta counts in memory, so in a file the target is found
+    /// through its own segment; `nil` when no file bytes hold it.
     private func resolvedOffset<Offset: BinaryInteger>(
         base: UInt64,
         relative: Offset,
-        adjustment: UInt64 = 0
+        adjustment: UInt64 = 0,
+        in machO: MachOFile
     ) -> UInt64? {
         guard let base = Int64(exactly: base),
               let relative = Int64(exactly: relative),
               let adjustment = Int64(exactly: adjustment) else {
             return nil
         }
+        if !machO.isLoadedFromDyldCache {
+            guard let field = Int(exactly: base + adjustment),
+                  let delta = Int(exactly: relative) else {
+                return nil
+            }
+            let target = machO.advancedOffset(field, by: delta)
+            guard MachOFile.isReadableOffset(target) else { return nil }
+            return UInt64(target)
+        }
         let resolved = base + relative + adjustment
         guard resolved >= 0 else {
             return nil
         }
         return UInt64(resolved)
+    }
+
+    /// ``resolvedOffset(base:relative:adjustment:in:)`` as an offset in the
+    /// file holding the list, whose offset is `base`; `entryOffset` is the
+    /// same place in the image's own accounting.
+    private func fileOffset<Offset: BinaryInteger>(
+        base: UInt64,
+        entryOffset: UInt64,
+        relative: Offset,
+        adjustment: UInt64 = 0,
+        in machO: MachOFile
+    ) -> UInt64? {
+        guard !machO.isLoadedFromDyldCache else {
+            guard let base = Int64(exactly: base),
+                  let relative = Int64(exactly: relative),
+                  let adjustment = Int64(exactly: adjustment) else {
+                return nil
+            }
+            let resolved = base + relative + adjustment
+            return resolved >= 0 ? UInt64(resolved) : nil
+        }
+        return resolvedOffset(
+            base: entryOffset,
+            relative: relative,
+            adjustment: adjustment,
+            in: machO
+        ).map { $0 + numericCast(machO.headerStartOffset) }
     }
 
     private func resolveString(
