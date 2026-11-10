@@ -55,7 +55,7 @@ extension ObjCIvarProtocol {
             offset: numericCast(fileOffset),
             length: MemoryLayout<UInt32>.size
         ).withUnsafeBytes {
-            $0.load(as: UInt32.self)
+            $0.loadUnaligned(as: UInt32.self)
         }
     }
 
